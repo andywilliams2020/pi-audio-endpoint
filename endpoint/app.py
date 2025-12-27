@@ -21,7 +21,6 @@ def load_config() -> dict:
     if DEFAULT_CONFIG_PATH.exists():
         with open(DEFAULT_CONFIG_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    # Fall back to example defaults if config.json not present yet
     with open(EXAMPLE_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -42,19 +41,13 @@ def log(line: str) -> None:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(msg)
     except Exception:
-        # If logging fails (permissions), still keep service alive
         pass
 
 
 def safe_resolve_path(p: str) -> Path:
-    """
-    Restrict playback to MUSIC_ROOT to avoid arbitrary file access.
-    Accept either absolute under MUSIC_ROOT, or relative to MUSIC_ROOT.
-    """
     raw = Path(p)
     resolved = (raw if raw.is_absolute() else (MUSIC_ROOT / raw)).resolve()
 
-    # Ensure resolved is inside MUSIC_ROOT
     try:
         resolved.relative_to(MUSIC_ROOT)
     except ValueError:
@@ -88,7 +81,6 @@ class PlayRequest(BaseModel):
     path: str = Field(..., description="Relative to music_root or absolute under music_root")
     kind: Literal["auto", "flac", "wav", "pcm"] = "auto"
 
-    # Only used for raw PCM
     pcm_format: Optional[Literal["S32_LE", "S24_LE", "S16_LE"]] = None
     pcm_rate: Optional[int] = None
     pcm_channels: Optional[int] = None
@@ -102,7 +94,6 @@ def stop_playback_locked(reason: str) -> None:
     if PROC and PROC.poll() is None:
         try:
             log(f"STOP reason={reason} pid={PROC.pid}")
-            # Terminate whole process group
             os.killpg(os.getpgid(PROC.pid), signal.SIGTERM)
             try:
                 PROC.wait(timeout=3)
@@ -119,10 +110,6 @@ def stop_playback_locked(reason: str) -> None:
 
 
 def spawn_player(cmd: str, display_file: str) -> None:
-    """
-    Spawn a single process group so we can kill the whole pipeline.
-    cmd runs under /bin/sh -lc so pipelines work.
-    """
     global PROC
     log(f"PLAY cmd={cmd}")
     PROC = subprocess.Popen(
@@ -142,7 +129,6 @@ def spawn_player(cmd: str, display_file: str) -> None:
         STATE.last_error = None
         STATE.last_exit_code = None
 
-    # Stream logs from process output
     assert PROC.stdout is not None
     for line in PROC.stdout:
         log(f"OUT {line.rstrip()}")
@@ -157,7 +143,6 @@ def spawn_player(cmd: str, display_file: str) -> None:
             log(f"EXIT rc={rc}")
             STATE.status = "error"
             STATE.last_error = f"Player exited with code {rc}"
-            # Clear process reference
             PROC = None
             STATE.pid = None
 
@@ -174,25 +159,32 @@ def build_command(req: PlayRequest, file_path: Path) -> str:
         elif ext in [".pcm", ".raw"]:
             kind = "pcm"
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown file type: {ext}. Use kind=flac|wav|pcm")
+            raise HTTPException(status_code=400, detail=f"Unknown file type: {ext}")
 
     f = shlex.quote(str(file_path))
 
     if kind == "flac":
-        # Decode on Pi, output straight to ALSA hw device
-        return f'flac -d -c {f} | aplay -D {shlex.quote(ALSA_DEVICE)}'
+        # Decode FLAC to S32_LE so ALSA never receives packed 24-bit samples.
+        # Native sample rate is preserved (no -ar).
+        return (
+            f'/usr/bin/ffmpeg -loglevel error -i {f} -f s32le -ac 2 - | '
+            f'/usr/bin/aplay -D {shlex.quote(ALSA_DEVICE)} -f S32_LE -c 2'
+        )
+
     if kind == "wav":
-        return f'aplay -D {shlex.quote(ALSA_DEVICE)} {f}'
+        return f'/usr/bin/aplay -D {shlex.quote(ALSA_DEVICE)} {f}'
+
     if kind == "pcm":
-        # Require PCM params
         if not req.pcm_format or not req.pcm_rate or not req.pcm_channels:
             raise HTTPException(
                 status_code=400,
-                detail="For kind=pcm, you must set pcm_format (S32_LE/S24_LE/S16_LE), pcm_rate, pcm_channels",
+                detail="For kind=pcm, pcm_format, pcm_rate and pcm_channels are required",
             )
         return (
-            f'aplay -D {shlex.quote(ALSA_DEVICE)} '
-            f'-f {shlex.quote(req.pcm_format)} -r {int(req.pcm_rate)} -c {int(req.pcm_channels)} {f}'
+            f'/usr/bin/aplay -D {shlex.quote(ALSA_DEVICE)} '
+            f'-f {shlex.quote(req.pcm_format)} '
+            f'-r {int(req.pcm_rate)} '
+            f'-c {int(req.pcm_channels)} {f}'
         )
 
     raise HTTPException(status_code=400, detail="Unsupported kind")
@@ -216,7 +208,6 @@ def play(req: PlayRequest):
     file_path = safe_resolve_path(req.path)
 
     with STATE_LOCK:
-        # Enforce single playback
         stop_playback_locked("preempt_for_new_play")
 
     cmd = build_command(req, file_path)
@@ -226,10 +217,8 @@ def play(req: PlayRequest):
     return {"ok": True, "playing": str(file_path), "device": ALSA_DEVICE}
 
 
-# Uvicorn entrypoint (used by systemd)
 def main():
     import uvicorn
-
     log(f"START bind={BIND_HOST}:{BIND_PORT} device={ALSA_DEVICE} root={MUSIC_ROOT}")
     uvicorn.run("app:app", host=BIND_HOST, port=BIND_PORT, log_level="warning")
 
