@@ -1,0 +1,7 @@
+{
+  "alsa_device": "hw:2,0",
+  "music_root": "/mnt/music",
+  "log_file": "/var/log/pi-audio-endpoint.log",
+  "bind_host": "0.0.0.0",
+  "bind_port": 8099
+}

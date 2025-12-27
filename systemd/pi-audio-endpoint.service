@@ -1,0 +1,18 @@
+[Unit]
+Description=Pi Audio Endpoint (HiFiBerry ALSA player)
+After=network.target
+
+[Service]
+Type=simple
+User=hirespi
+WorkingDirectory=/home/hirespi/pi-audio-endpoint/endpoint
+ExecStart=/usr/bin/python3 -u /home/hirespi/pi-audio-endpoint/endpoint/app.py
+Restart=always
+RestartSec=2
+
+# Hardening (basic)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
